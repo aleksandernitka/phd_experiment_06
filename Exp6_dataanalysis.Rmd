@@ -1,0 +1,514 @@
+---
+title: "Experiment 1 Eye Tracking HDF5"
+author: "Aleksander W. Nitka"
+date: "5/11/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r constants, include=FALSE}
+
+# CONSTANTS - ADJUST
+
+SCR_SIZE_XY = c(1920,1080)  # Specify screen size in pix:
+IMG_SIZE    = c(350,350)    # Image size in pix:
+
+# Images locations:
+IMG_LOC_L   = c(-(SCR_SIZE_XY[1]/4),0)
+IMG_LOC_R   = c((SCR_SIZE_XY[1]/4),0)
+
+# AOIs for dwell calculaion
+aoi_l_lb = IMG_LOC_L[1] - (IMG_SIZE[1]/2)     # left border
+aoi_l_rb = IMG_LOC_L[1] + (IMG_SIZE[1]/2)     # right border
+aoi_l_tb = 175      # top border
+aoi_l_bb = -175     # bottom border
+
+aoi_r_lb = IMG_LOC_R[1] - (IMG_SIZE[1]/2)
+aoi_r_rb = IMG_LOC_R[1] + (IMG_SIZE[1]/2)
+aoi_r_tb = 175
+aoi_r_bb = -175
+
+
+# Some other AOIs, for reference:
+# IN ORDER as: (leftBoundry,rightBoundry,topBoundry,bottomBoundry)
+# L_AOI       = c(-SCR_SIZE_XY[1]/2,0, SCR_SIZE_XY[2]/2, - SCR_SIZE_XY[2]/2)         
+# R_AOI       = c(0,SCR_SIZE_XY[1]/2, SCR_SIZE_XY[2]/2, - SCR_SIZE_XY[2]/2)
+
+# Device's sampling frequency:
+SAMPL_FREQ  = 300 
+
+# How long for was the camera recording in seconds:
+EXP_TIME_S  = 3                                 
+
+# CONSTANTS - AUTO, screen boundries
+SCR_LEFT_X_BOUND  = -(SCR_SIZE_XY[1]/2)
+SCR_RIGHT_X_BOUND = SCR_SIZE_XY[1]/2
+SCR_TOP_Y_BOUND   = SCR_SIZE_XY[2]/2
+SCR_BOT_Y_BOUND   = -(SCR_SIZE_XY[2]/2)
+```
+
+```{r packages and functions import, include=FALSE, echo=FALSE}
+list.of.packages <- c("ggplot2")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)>0) {install.packages(new.packages)}
+
+library("ggplot2")          # plotting
+library('jtools')           # APA plots for ggpl
+
+# Home-brewed functions for analysis - have to be in the same folder
+source('hdf5.extractor.R')  # extracting of data from the HDF5 data structures
+source('dwell.calc.R')      # dwell time calculator
+
+```
+
+```{r load HDF5 data, include=FALSE, echo=FALSE}
+# Get all files from the directory
+files.hdf5 = list.files(path = "./hdf5", pattern = "\\.hdf5$")
+for (i in 1:length(files.hdf5)) { files.hdf5[i] = paste("hdf5", files.hdf5[i], sep = '/')}
+
+# What do I want to extract from the HDF5
+events.hdf5 = c("/eyetracker/BinocularEyeSampleEvent")
+
+# Run the extractor
+hdf5.extractor(files = files.hdf5, events = events.hdf5, import.messages = TRUE, logs = TRUE)
+
+
+```
+
+
+```{r prepocess data from HDF5, include=FALSE, echo=FALSE}
+
+ssdata = data.frame(matrix(nrow = length(hdf5.import.evt), ncol = 5))
+names(ssdata) = c('ss', 'age', 'gender','glasses','contacts')
+
+for(s in 1:length(hdf5.import.df)){
+  
+  message(sprintf("Processing file %i out of %i - %s", s, length(hdf5.import.df), hdf5.import.df[s]))
+  
+  ## Load both events and eye tracking data to tmp
+  tmp.data    = eval(parse(text = hdf5.import.df[s]))
+  tmp.events  = eval(parse(text = hdf5.import.evt[s]))
+  
+  ## Create average of L/R eyes:
+  # Gaze location
+  tmp.data$gaze_x = (tmp.data$left_gaze_x + tmp.data$right_gaze_x)/2
+  tmp.data$gaze_y = (tmp.data$left_gaze_y + tmp.data$right_gaze_y)/2
+  # Pupil diameter
+  tmp.data$pupil_measure = (tmp.data$left_pupil_measure1 + tmp.data$right_pupil_measure1)/2
+  # Eye Cam
+  tmp.data$eye_cam_x = (tmp.data$left_eye_cam_x + tmp.data$right_eye_cam_x)/2
+  tmp.data$eye_cam_y = (tmp.data$left_eye_cam_y + tmp.data$right_eye_cam_y)/2
+  tmp.data$eye_cam_z = (tmp.data$left_eye_cam_z + tmp.data$right_eye_cam_z)/2
+  
+  ## Remove not needed variables:
+  drops <- c('device_id','experiment_id', 'session_id', 'confidence_interval','filter_id','type',
+             'left_gaze_z','left_angle_x','left_angle_y','left_raw_x', 'left_raw_y',
+             'left_pupil_measure2', 'left_pupil_measure2_type','left_ppd_x', 'left_ppd_y',
+             'left_velocity_x', 'left_velocity_y','left_velocity_xy','left_pupil_measure1_type',
+             'right_gaze_z','right_angle_x', 'right_angle_y','right_raw_x', 'right_raw_y',
+             'right_pupil_measure2', 'right_pupil_measure2_type','right_ppd_x', 'right_ppd_y',
+             'right_velocity_x', 'right_velocity_y','right_velocity_xy','right_pupil_measure1_type')
+  tmp.data = tmp.data[ , !(names(tmp.data) %in% drops)]
+  remove(drops)
+  
+  
+  ## Create an event structure:
+  # Extract sample info:
+  tmpsample = tmp.events$text
+  
+  ssdata$ss[s] = sapply(strsplit(grep('SUBJECT ID: ', tmpsample, value = TRUE), split = ": "), "[", 2)
+  ssdata$age[s] = sapply(strsplit(grep('AGE: ', tmpsample, value = TRUE), split = ": "), "[", 2)
+  ssdata$gender[s] = sapply(strsplit(grep('GENDER: ', tmpsample, value = TRUE), split = ": "), "[", 2)
+  ssdata$glasses[s] = sapply(strsplit(grep('GLASSES: ', tmpsample, value = TRUE), split = ": "), "[", 2)
+  ssdata$contacts[s] = sapply(strsplit(grep('CONTACTS: ', tmpsample, value = TRUE), split = ": "), "[", 2)
+  
+  # 1. subset trial messages = remove sample info
+  tmp.events = subset(tmp.events, grepl("t", tmp.events$text))
+  tmp.events$start = NA
+  tmp.events$end = NA
+  tmp.events$dur = NA
+  
+  
+  
+  # 2. Splice the trial info from the message for easier subsetting later
+  for(l in 1:nrow(tmp.events)){
+    tmp.events$trigger[l] = sapply(strsplit(tmp.events$text[l], split = " "),"[",1)
+    tmp.events$trial.no[l] = sapply(strsplit(tmp.events$text[l], split = " "),"[",2)
+    tmp.events$design.order[l] = sapply(strsplit(tmp.events$text[l], split = " "),"[",3)
+    tmp.events$target.trial[l] = sapply(strsplit(tmp.events$text[l], split = " "),"[",5)
+    tmp.events$trial.type[l] = sapply(strsplit(tmp.events$text[l], split = " "),"[",6)
+    tmp.events$trial.type.b[l] = sapply(strsplit(tmp.events$text[l], split = " "),"[",7)
+    tmp.events$trial.type.c[l] = sapply(strsplit(tmp.events$text[l], split = " "),"[",8)
+    tmp.events$trial.stage[l] = sapply(strsplit(tmp.events$text[l], split = " "),"[",4)
+  }
+  
+  for (l in 1:nrow(tmp.events)){
+    if (tmp.events$trigger[l] == 'tStart'){
+      tmp.events$start[l] = tmp.events$time[l]
+      tmp.events$end[l] = tmp.events$time[l+1]
+      tmp.events$dur[l] = tmp.events$end[l] - tmp.events$start[l]
+    }
+  }
+  
+  # Remove all S3's for SOR and OIP
+  tmp.events = subset(tmp.events, !(tmp.events$trial.stage == 'S3' & (tmp.events$trial.type == 'sor' | tmp.events$trial.type == 'oip')))
+  
+  # Mark all phases
+  tmp.events$Test = FALSE
+  tmp.events$phase = NA
+  
+  for (t in 1:nrow((tmp.events))) {
+    if (tmp.events$trial.type[t] == 'rr') {
+      if (tmp.events$trial.stage[t] == 'S3') {
+        tmp.events$Test[t] = TRUE
+        tmp.events$phase[t] = 'test'
+      }
+      else if (tmp.events$trial.stage[t] == 'S2') {
+        tmp.events$phase[t] = 'sample2'
+      }
+      else if (tmp.events$trial.stage[t] == 'S1') {
+        tmp.events$phase[t] = 'sample1'
+      }
+    }
+    else {
+      if (tmp.events$trial.stage[t] == 'S2') {
+        tmp.events$Test[t] = TRUE 
+        tmp.events$phase[t] = 'test'
+      }
+      else if (tmp.events$trial.stage[t] == 'S1') {
+        tmp.events$phase[t] = 'sample'
+      }
+    }
+  }
+  
+  # Remove end triggers
+  tmp.events = subset(tmp.events, tmp.events$trigger == 'tStart')
+  
+  # Keep only TEST trials - removed 21/11/2017, as I want to look at beh at sample
+  # tmp.events = subset(tmp.events, tmp.events$Test == TRUE)
+  
+  # Remove all Target Trials:
+  tmp.events = subset(tmp.events, tmp.events$target.trial == 'nt')
+  
+  # Save processed files
+  assign(hdf5.import.evt[s], tmp.events)
+  assign(hdf5.import.df[s], tmp.data)
+  
+}
+
+```
+
+```{r filtering, include=FALSE, echo=FALSE}
+
+# # Filter ONLY the data that is selected for further analysis - see EVENTS
+# # Status codes 2,20,22 (or any that are != 0) indicate some sort of trackloss
+
+for (t in 1:length((hdf5.import.evt))){
+  
+  message(sprintf("%s - Processing file %i out of %i - %s", 
+                  Sys.time(), t, length(hdf5.import.df), hdf5.import.df[t]))
+  
+  tmp.data    = eval(parse(text = hdf5.import.df[t]))
+  tmp.events  = eval(parse(text = hdf5.import.evt[t]))
+  
+  tmp.data$trackloss = FALSE
+  
+  
+  filterCond = (      tmp.data$status != 0 |
+                        
+                        tmp.data$left_gaze_x < SCR_LEFT_X_BOUND |
+                        tmp.data$left_gaze_x > SCR_RIGHT_X_BOUND |
+                        
+                        tmp.data$right_gaze_x < SCR_LEFT_X_BOUND |
+                        tmp.data$right_gaze_x > SCR_RIGHT_X_BOUND |
+                        
+                        tmp.data$left_gaze_y > SCR_TOP_Y_BOUND |
+                        tmp.data$left_gaze_y < SCR_BOT_Y_BOUND |
+                        
+                        tmp.data$right_gaze_y > SCR_TOP_Y_BOUND |
+                        tmp.data$right_gaze_y < SCR_BOT_Y_BOUND
+                      
+  )
+  
+  
+  tmp.data$gaze_x[filterCond]           = NA
+  tmp.data$gaze_y[filterCond]           = NA
+  tmp.data$pupil_measure[filterCond]    = NA
+  tmp.data$eye_cam_x[filterCond]        = NA
+  tmp.data$eye_cam_y[filterCond]        = NA
+  tmp.data$eye_cam_z[filterCond]        = NA
+  tmp.data$trackloss[filterCond]        = TRUE
+  
+  for(l in 1:nrow(tmp.events)){
+    
+    
+    
+    
+    # subset the df by the start and end:
+    ttrial = subset(tmp.data, tmp.data$time > tmp.events$start[l] &
+                      tmp.data$time < tmp.events$end[l])
+    
+    # Filter trials based on tracker message and/or impossible gaze location
+    # On each trial if either tracker status is not 0 or gaze from either
+    # eye is determined to be outside the screen
+    
+    tmp.events$trackloss[l] = nrow(subset(ttrial, ttrial$trackloss== TRUE)) / nrow(ttrial)
+    
+  }
+  
+  assign(hdf5.import.evt[t], tmp.events)
+  assign(hdf5.import.df[t], tmp.data)
+  
+  # Add Subject to the experiment
+  # dataExpbasic$data[[ sprintf("ss%s",t) ]] = trials
+  
+  remove(ttrial, tmp.data, tmp.events)
+}
+
+
+```
+
+
+```{r reject trials, include=FALSE, echo=FALSE}
+# Only keep trials in which trackloss is higher than the criterion (crit)
+crit = 0.50
+ssdata$rejSOR = NA
+ssdata$rejOIP = NA
+ssdata$rejRR = NA
+
+for (t in 1:length((hdf5.import.evt))){
+  
+  tmp.events  = eval(parse(text = hdf5.import.evt[t]))
+  
+  # Subset to TEST only
+  tmp.events = subset(tmp.events, tmp.events$phase == 'test')
+  
+  tmp.events$rejectTrial = FALSE
+  
+  for (l in 1:nrow(tmp.events)){
+    
+    if (tmp.events$trackloss[l] >= crit) {
+      
+      tmp.events$rejectTrial[l] = TRUE
+    }
+  }
+  assign(hdf5.import.evt[t], tmp.events)
+  
+  ssdata$rejSOR[t] = nrow(subset(tmp.events, trial.type == 'sor' & rejectTrial == TRUE)) / nrow(subset(tmp.events, trial.type == 'sor'))
+  ssdata$rejOIP[t] = nrow(subset(tmp.events, trial.type == 'oip' & rejectTrial == TRUE)) / nrow(subset(tmp.events, trial.type == 'oip'))
+  ssdata$rejRR[t] = nrow(subset(tmp.events, trial.type == 'rr' & rejectTrial == TRUE)) / nrow(subset(tmp.events, trial.type == 'rr'))
+}
+
+ssdata$REJECTSS = 0
+ssdata$REJECTSS[ssdata$rejSOR > crit | ssdata$rejOIP > crit | ssdata$rejRR > crit] = 1
+
+```
+
+
+```{r data save, include=FALSE, echo=FALSE}
+
+#save.image(file="PressFor_data_predwell.RData")
+load("PressFor_data_predwell.RData")
+```
+
+```{r dwell time,include=FALSE, echo=FALSE}
+
+# This part calculates dwell time based on cooridates provided, if x,y coordinate lies within this 
+# coordinate then function adds 1. Dwell is calcualted: 
+# 1. total, end of trial sums for each AOI and
+# 2. dwell as a funcition of time where each sample is a snapshot and represents cumulative state at each time
+# 3. Boolean value for probability calculation if overlap = 1, each sample is binary.
+
+source('dwell.calc.R') 
+
+plotcontrol = 0
+
+for(i in 1:length(hdf5.import.df)) {
+  
+  message(sprintf("Processing file %i out of %i - %s", i, length(hdf5.import.df), hdf5.import.df[i]))
+  
+  tmp.data    = eval(parse(text = hdf5.import.df[i]))
+  tmp.events  = eval(parse(text = hdf5.import.evt[i]))
+  
+  
+  # Total values can be put back into the events DF
+  tmp.events$dwell.L.side       = NA 
+  tmp.events$dwell.R.side       = NA 
+  tmp.events$dwell.New          = NA
+  tmp.events$dwell.Old          = NA
+  tmp.events$D2                 = NA 
+  
+  
+  
+  for (t in 1:nrow(tmp.events)) {
+    
+    
+    # Get a trial data
+    tmp.trial = subset(tmp.data, (tmp.data$time > tmp.events$start[t]) & (tmp.data$time < tmp.events$end[t]) )
+    
+    # Run all dwell caluclations and save to variables, recode to T/NT later
+    
+    tmp.events$dwell.L.side[t] = dwell.calc("tmp.trial", lb = aoi_l_lb, rb = aoi_l_rb, tb = aoi_l_tb, bb = aoi_l_bb, start = 150, end = 600)$`Total Dwell`
+    tmp.events$dwell.R.side[t] = dwell.calc("tmp.trial", lb = aoi_r_lb, rb = aoi_r_rb, tb = aoi_r_tb, bb = aoi_r_bb, start = 150, end = 600)$`Total Dwell`
+    
+    
+    # control plots
+    if (plotcontrol == 1){
+      png(filename = sprintf('cps/cp_%s_%s.png', strsplit(hdf5.import.df[i], '[.]')[[1]][1], tmp.events$trial.no[t]))
+      
+      plot(tmp.trial$gaze_x, tmp.trial$gaze_y, type = 'l', xlim = c(SCR_LEFT_X_BOUND, SCR_RIGHT_X_BOUND), ylim = c(SCR_BOT_Y_BOUND, SCR_TOP_Y_BOUND))
+      rect(xleft = aoi_l_lb, xright = aoi_l_rb, ytop = aoi_l_tb, ybottom = aoi_l_bb, )
+      rect(xleft = aoi_r_lb, xright = aoi_r_rb, ytop = aoi_r_tb, ybottom = aoi_r_bb)
+      text('+', x = 0, y = 0)
+      dev.off()
+    }   
+  }
+  
+  
+  
+  
+  # Save processed files
+  assign(hdf5.import.evt[i], tmp.events)
+  assign(hdf5.import.df[i], tmp.data)
+  
+  
+}
+```
+
+```{r recode + D2 + lost trials (NaNs)}
+
+ssdata$rej2SOR = NA
+ssdata$rej2OIP = NA
+ssdata$rej2RR = NA
+
+for(s in 1:length(hdf5.import.df)) {
+  
+  tmp.events  = eval(parse(text = hdf5.import.evt[s]))
+  
+  # recode
+  for (i in 1:nrow(tmp.events)){
+    
+    if (tmp.events$trial.type[i] == 'sor' | tmp.events$trial.type[i] == 'oip'){
+      
+      if (tmp.events$trial.type.b[i] == 'ab'){
+        tmp.events$dwell.New[i] = tmp.events$dwell.R.side[i]
+        tmp.events$dwell.Old[i] = tmp.events$dwell.L.side[i]
+        tmp.events$D2[i] = (tmp.events$dwell.R.side[i] - tmp.events$dwell.L.side[i]) / (tmp.events$dwell.R.side[i] + tmp.events$dwell.L.side[i])
+      } else {
+        tmp.events$dwell.New[i] = tmp.events$dwell.L.side[i]
+        tmp.events$dwell.Old[i] = tmp.events$dwell.R.side[i]
+        tmp.events$D2[i] = (tmp.events$dwell.L.side[i] - tmp.events$dwell.R.side[i]) / (tmp.events$dwell.L.side[i] + tmp.events$dwell.R.side[i])
+      }
+      
+    } else {
+      
+      if (tmp.events$trial.type.b[i] == 'ab'){
+        tmp.events$dwell.New[i] = tmp.events$dwell.L.side[i]
+        tmp.events$dwell.Old[i] = tmp.events$dwell.R.side[i]
+        tmp.events$D2[i] = (tmp.events$dwell.L.side[i] - tmp.events$dwell.R.side[i]) / (tmp.events$dwell.L.side[i] + tmp.events$dwell.R.side[i])
+      } else {
+        tmp.events$dwell.New[i] = tmp.events$dwell.R.side[i]
+        tmp.events$dwell.Old[i] = tmp.events$dwell.L.side[i]
+        tmp.events$D2[i] = (tmp.events$dwell.R.side[i] - tmp.events$dwell.L.side[i]) / (tmp.events$dwell.R.side[i] + tmp.events$dwell.L.side[i])
+      }
+      
+    }
+    
+  }
+  
+  tmp.events$rejectTrial[is.na(tmp.events$D2) == TRUE] = TRUE
+  
+  # calc lost trials (NaNs)
+  ssdata$rej2SOR[s] = nrow(subset(tmp.events, trial.type == 'sor' & rejectTrial == TRUE)) / nrow(subset(tmp.events, trial.type == 'sor'))
+  ssdata$rej2OIP[s] = nrow(subset(tmp.events, trial.type == 'oip' & rejectTrial == TRUE)) / nrow(subset(tmp.events, trial.type == 'oip'))
+  ssdata$rej2RR[s] = nrow(subset(tmp.events, trial.type == 'rr' & rejectTrial == TRUE)) / nrow(subset(tmp.events, trial.type == 'rr'))  
+  
+  
+  assign(hdf5.import.evt[s], tmp.events)
+  
+}
+
+```
+
+
+```{r data save dwell processed, include=FALSE, echo=FALSE}
+# This is saved locally on big mac to save dropbox space
+#save.image(file="PressFor_data_PostDwellAnalisys.RData")
+load("PressFor_data_PostDwellAnalisys.RData")
+```
+
+```{r sample details}
+print(paste('N = ', length(hdf5.import.evt)))
+sd(as.numeric(ssdata$age))
+table(ssdata$gender)
+table(ssdata$contacts)
+
+```
+
+```{r analysis}
+
+mdf = data.frame(matrix(ncol = 3))
+names(mdf) = c('ss','Condition','D2')
+
+for (i in 1:length(hdf5.import.evt)){
+
+  tmp.events  = eval(parse(text = hdf5.import.evt[i]))
+  
+  # Subset to non-rejected trials
+  tmp.events = subset(tmp.events, tmp.events$rejectTrial == FALSE)
+  
+  tmp = data.frame(matrix(nrow = 3, ncol = 3))
+  names(tmp) = names(mdf)
+  tmp$ss = strsplit(hdf5.import.evt[i],'[.]')[[1]][1]
+  tmp$Condition = c('sor','rr','oip')
+  
+  for (t in 1:nrow(tmp)) {
+    
+    tmp$D2[t] = mean(subset(tmp.events$D2, tmp.events$trial.type == tmp$Condition[t]))
+    
+  }  
+  
+  mdf = rbind(mdf, tmp)
+  
+}
+
+mdf = subset(mdf, is.na(mdf$ss) == FALSE)
+mdf_sor = subset(mdf, mdf$Condition == 'sor')
+mdf_oip = subset(mdf, mdf$Condition == 'oip')
+mdf_rr = subset(mdf, mdf$Condition == 'rr')
+
+source('tt.os.R')
+source('tt.ps.R')
+
+os.sor = tt.os(mdf_sor$D2, mu = 0, DV = 'D2 for SOR', N = 22)
+os.oip = tt.os(mdf_oip$D2, mu = 0, DV = 'D2 for OIP', N = 22)
+os.rr = tt.os(mdf_rr$D2, mu = 0, DV = 'D2 for RR', N = 22)
+ps.sor_rr = tt.ps(mdf_sor$D2, mdf_rr$D2, N = 22, DV1 = 'D2 for SOR', DV2 = 'D2 for RR')
+ps.rr_oip = tt.ps(mdf_rr$D2, mdf_oip$D2, N = 22, DV1 = 'D2 for RR', DV2 = 'D2 for OIP')
+```
+
+```{r plts}
+
+plts = data.frame(matrix(nrow = 3, ncol = 3))
+names(plts) = c('Condition','D2','SD')
+plts$Condition = c('SOR','RR','OIP')
+
+plts$D2[plts$Condition == 'SOR'] = mean(mdf_sor$D2)
+plts$SD[plts$Condition == 'SOR'] = sd(mdf_sor$D2)
+plts$D2[plts$Condition == 'OIP'] = mean(mdf_oip$D2)
+plts$SD[plts$Condition == 'OIP'] = sd(mdf_oip$D2)
+plts$D2[plts$Condition == 'RR'] = mean(mdf_rr$D2)
+plts$SD[plts$Condition == 'RR'] = sd(mdf_rr$D2)
+
+library(ggplot2)
+library(jtools)
+
+plt = ggplot(data = plts, aes(x = Condition, y = D2)) + 
+  geom_point(aes(x = Condition, y = D2), size = 3, position=position_dodge(0.05)) +
+  geom_errorbar(aes(ymin=D2-SD, ymax=D2+SD), width=.1, position=position_dodge(0.05), inherit.aes = TRUE) +
+  theme_apa() + xlab('Condition') + ylab('Mean D2') + theme(text = element_text(size=12), axis.text = element_text(size = 12))
+ggsave('Exp06_Main.png', plot = last_plot(), scale = 1, dpi = 300)
+```
